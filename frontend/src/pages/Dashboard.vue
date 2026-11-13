@@ -22,7 +22,10 @@ onMounted(async () => {
       <div class="tile"><div class="hero-num">{{ stats.stream_count }}</div><div class="muted">变更流</div></div>
       <div class="tile"><div class="hero-num">{{ stats.enabled_streams }}</div><div class="muted">启用</div></div>
       <div class="tile"><div class="hero-num">{{ stats.sink_count }}</div><div class="muted">Sink</div></div>
-      <div class="tile"><div class="hero-num">{{ stats.quarantine_count }}</div><div class="muted">隔离</div></div>
+      <div class="tile">
+        <div class="hero-num">{{ stats.quarantine_count }}</div>
+        <div class="muted">隔离（毒丸 {{ stats.quarantine_kinds ? stats.quarantine_kinds.poison : 0 }} / 缺口 {{ stats.quarantine_kinds ? stats.quarantine_kinds.gap : 0 }}）</div>
+      </div>
       <div class="tile"><div class="hero-num">{{ stats.run_count }}</div><div class="muted">Apply Runs</div></div>
     </div>
     <router-link to="/apply">去应用台跑一趟 →</router-link>

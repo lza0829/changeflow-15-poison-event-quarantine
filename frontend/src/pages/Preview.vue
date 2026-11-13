@@ -32,16 +32,22 @@ onMounted(async () => {
     </div>
     <p v-if="err" class="tag danger">{{ err }}</p>
     <div class="panel" v-if="preview">
-      <p class="muted">共 {{ preview.count }} 条（展示前 50）</p>
+      <p class="muted">共 {{ preview.count }} 条（展示前 50）；带毒丸标签的事件不会进 Sink。</p>
       <table>
-        <thead><tr><th>seq</th><th>op</th><th>entity_key</th><th>event_ts</th><th>payload</th></tr></thead>
+        <thead><tr><th>seq</th><th>op</th><th>entity_key</th><th>event_ts</th><th>payload</th><th>毒丸</th></tr></thead>
         <tbody>
           <tr v-for="e in preview.events" :key="e.seq">
             <td>{{ e.seq }}</td>
             <td>{{ e.op }}</td>
-            <td>{{ e.entity_key }}</td>
-            <td>{{ e.event_ts }}</td>
+            <td>{{ e.entity_key || '（空）' }}</td>
+            <td>{{ e.event_ts || '（空）' }}</td>
             <td><pre class="mono">{{ JSON.stringify(e.payload) }}</pre></td>
+            <td>
+              <span v-if="e.poison_reasons && e.poison_reasons.length" class="tag danger">
+                {{ e.poison_reasons.join(' | ') }}
+              </span>
+              <span v-else class="tag ok">合法</span>
+            </td>
           </tr>
         </tbody>
       </table>

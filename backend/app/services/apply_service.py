@@ -6,6 +6,12 @@ from app.config import FIXTURES_DIR
 from app.db import connect
 from app.engines.apply_rules import classify_event
 from app.engines.parse_change import parse_change_fixture
+from app.engines.poison_rules import (
+    DEFAULT_POISON_POLICY,
+    POISON_POLICY_CONTINUE,
+    POISON_POLICY_STOP,
+    POISON_POLICIES,
+)
 from app.repositories import cursors as cursor_repo
 from app.repositories import ledger as ledger_repo
 from app.repositories import quarantine as quarantine_repo
@@ -39,6 +45,12 @@ def run_apply(stream_id: int) -> dict[str, Any]:
 
         cursor_before = int(stream["apply_cursor"] or 0)
         gap_policy = settings_repo.get(conn, "gap_policy", "stop_quarantine") or "stop_quarantine"
+        poison_policy = (
+            settings_repo.get(conn, "poison_policy", DEFAULT_POISON_POLICY)
+            or DEFAULT_POISON_POLICY
+        )
+        if poison_policy not in POISON_POLICIES:
+            poison_policy = DEFAULT_POISON_POLICY
         run_id = runs_repo.create_run(conn, stream_id, cursor_before)
         path = FIXTURES_DIR / stream["fixture_path"]
 
@@ -60,12 +72,16 @@ def run_apply(stream_id: int) -> dict[str, Any]:
             raise
 
         loaded = len(events)
+        poison_in_fixture = sum(1 for e in events if e.get("poison_reasons"))
         applied = 0
         quarantined = 0
+        poison_quarantined = 0
+        gap_quarantined = 0
         skipped = 0
         cursor = cursor_before
         dispositions: list[str] = []
-        stopped = False
+        poison_seen: list[dict[str, Any]] = []
+        stop_reason: str | None = None  # "gap" | "poison"
 
         for event in events:
             already = cursor_repo.is_applied(conn, stream_id, int(event["seq"]))
@@ -74,6 +90,7 @@ def run_apply(stream_id: int) -> dict[str, Any]:
                 cursor=cursor,
                 already_applied=already,
                 gap_policy=gap_policy,
+                poison_policy=poison_policy,
             )
 
             if decision == "skipped_duplicate":
@@ -84,7 +101,13 @@ def run_apply(stream_id: int) -> dict[str, Any]:
                 dispositions.append(decision)
                 continue
 
-            if decision == "quarantine_gap":
+            if decision in ("quarantine_gap", "quarantine_poison_stop", "quarantine_poison"):
+                is_poison = decision != "quarantine_gap"
+                if is_poison:
+                    # 毒丸原因必须能看出是毒丸：reason 带 poison_ 前缀，多规则用 | 连接。
+                    reason = "|".join(event["poison_reasons"])
+                else:
+                    reason = "gap_before_seq"
                 ledger_repo.insert_ledger(
                     conn, stream_id=stream_id, run_id=run_id, event=event, disposition=decision
                 )
@@ -94,15 +117,33 @@ def run_apply(stream_id: int) -> dict[str, Any]:
                     run_id=run_id,
                     seq=int(event["seq"]),
                     entity_key=event["entity_key"],
-                    reason="gap_before_seq",
+                    reason=reason,
                     payload=event.get("payload") or {},
                 )
                 quarantined += 1
                 dispositions.append(decision)
-                stopped = True
-                break
+                if is_poison:
+                    poison_quarantined += 1
+                    poison_seen.append(
+                        {"seq": int(event["seq"]), "reasons": list(event["poison_reasons"])}
+                    )
+                else:
+                    gap_quarantined += 1
 
-            # apply
+                if decision == "quarantine_poison_stop":
+                    # 停住策略：毒丸自身不 applied、不进 sink，游标不越过，其后事件不处理。
+                    stop_reason = "poison"
+                    break
+                if decision == "quarantine_gap":
+                    stop_reason = "gap"
+                    break
+                # quarantine_poison：隔离后继续。游标是“消费位点”，越过毒丸位点
+                # （后续合法 seq 才能续序应用），但毒丸不写 applied_seqs、不进 Sink。
+                cursor = int(event["seq"])
+                streams_repo.set_cursor(conn, stream_id, cursor)
+                continue
+
+            # apply —— 走到这里的一定是结构合法且续序的事件
             if event["op"] == "upsert":
                 sink_repo.upsert(
                     conn,
@@ -124,14 +165,39 @@ def run_apply(stream_id: int) -> dict[str, Any]:
             applied += 1
             dispositions.append("applied")
 
-        status = "partial" if stopped else "succeeded"
+        if stop_reason == "poison":
+            status = "stopped_poison"
+        elif stop_reason == "gap":
+            status = "partial"
+        else:
+            status = "succeeded"
+
         report = {
             "stream_id": stream_id,
             "gap_policy": gap_policy,
+            "poison_policy": poison_policy,
+            "poison_policy_label": (
+                "毒丸处停住" if poison_policy == POISON_POLICY_STOP else "隔离毒丸后继续"
+            ),
             "dispositions": dispositions,
-            "stopped_on_gap": stopped,
+            "stop_reason": stop_reason,
+            "stopped_on_gap": stop_reason == "gap",
+            "stopped_on_poison": stop_reason == "poison",
+            "poison_in_fixture": poison_in_fixture,
+            "counts": {
+                "loaded": loaded,
+                "applied": applied,
+                "quarantined_total": quarantined,
+                "quarantined_poison": poison_quarantined,
+                "quarantined_gap": gap_quarantined,
+                "skipped": skipped,
+            },
+            "poison_events": poison_seen,
+            "cursor_before": cursor_before,
+            "cursor_after": cursor,
             "sink_count_after": sink_repo.count_sink(conn),
             "quarantine_count_after": quarantine_repo.count_quarantine(conn),
+            "quarantine_kinds_after": quarantine_repo.count_by_kind(conn),
         }
         runs_repo.finish_run(
             conn,

@@ -1,4 +1,5 @@
 from app.db import connect
+from app.engines.poison_rules import DEFAULT_POISON_POLICY
 
 
 def init_db():
@@ -95,11 +96,23 @@ def init_db():
                     1,
                     "clean：seq 1→3 连续库存变更",
                 ),
+                (
+                    "Orders CDC（含毒丸）",
+                    "orders_cdc_poison.jsonl",
+                    "order",
+                    0,
+                    1,
+                    "毒丸夹具：seq3 缺实体键、seq5 非法 op、seq7 upsert 空 payload；毒丸后仍有合法 seq",
+                ),
             ],
         )
         conn.execute("INSERT INTO settings(key, value) VALUES ('project_label', 'Changeflow')")
         conn.execute(
             "INSERT INTO settings(key, value) VALUES ('gap_policy', 'stop_quarantine')"
+        )
+        conn.execute(
+            "INSERT INTO settings(key, value) VALUES (?, ?)",
+            ("poison_policy", DEFAULT_POISON_POLICY),
         )
         conn.commit()
     conn.close()
